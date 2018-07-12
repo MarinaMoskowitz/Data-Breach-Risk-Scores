@@ -1,0 +1,438 @@
+---
+title: "Marina Moskowitz's Final Project"
+output: html_notebook
+---
+```{r}
+setwd("~/Downloads")
+library(openxlsx)
+library(lubridate)
+library(stringr)
+library(caret)
+library(e1071)
+library(randomForest)
+library(ggplot2)
+library(dplyr)
+require('RMySQL')
+library(RSQLite)
+library(rpart)
+rm(list = ls())
+
+dataBreaches2013 <- read.csv("data2013.csv", header = TRUE, stringsAsFactors = FALSE)
+dataBreaches2014 <- read.csv("data2014.csv", header = TRUE, stringsAsFactors = FALSE)
+dataBreaches2015 <- read.csv("data2015.csv", header = TRUE, stringsAsFactors = FALSE)
+dataBreaches2016 <- read.csv("data2016.csv", header = TRUE, stringsAsFactors = FALSE)
+dataBreaches2017 <- read.csv("data2017.csv", header = TRUE, stringsAsFactors = FALSE)
+
+# removing first row from dataframe because it is just test data
+dataBreaches2017 <- dataBreaches2017[-c(1),]
+
+#combine all the datasets from all of the years together
+allBreaches <- rbind(dataBreaches2013, dataBreaches2014, dataBreaches2015, dataBreaches2016, dataBreaches2017)
+as.data.frame(allBreaches)
+
+# Exclude link and rank
+allBreaches <- allBreaches %>% 
+  select(Organisation, Records.Breached, Date, Type, Source.of.Breach, Location, Industry, Risk.Source)
+
+# removing commas from numbers of records stolen and making values numeric
+allBreaches$Records.Breached <- as.numeric(gsub(",", "", allBreaches$Records.Breached))
+
+# naming the columns
+colnames(allBreaches) <- c("Organisation", "NumRecordsStolen", "Date", "Type", "breachSource", "Location", "Industry", "riskScore")
+
+View(allBreaches)
+```
+
+detecting outliars 
+```{r}
+sapply(allBreaches, function(x) sum(is.na(x)))
+hist(allBreaches$riskScore)
+
+# there are no outliars, howeverm this graph shows that the data is not normally distributed 
+```
+
+making just a year column 
+```{r}
+allBreaches$Year <- NA
+allBreaches$Year <- allBreaches$Date
+allBreaches$Year <- str_sub(allBreaches$Year,7,8)
+
+allBreaches$Year <- as.integer(allBreaches$Year)
+```
+
+making type numeric
+```{r}
+allBreaches$Type <- as.factor(allBreaches$Type)
+allBreaches$typeNumeric <- NA
+allBreaches$typeNumeric <- as.integer(allBreaches$Type)
+
+allBreaches$breachSource <- as.factor(allBreaches$breachSource)
+allBreaches$breachSourceNumeric <- NA
+allBreaches$breachSourceNumeric <- as.integer(allBreaches$breachSource)
+```
+
+correlation/collinearity analysis
+```{r}
+cor(allBreaches$NumRecordsStolen, allBreaches$riskScore, use = "complete.obs", method="pearson") # 0.1040542
+cor(allBreaches$breachSourceNumeric, allBreaches$riskScore, use = "complete.obs", method="pearson") # 0.1341638256
+cor(allBreaches$typeNumeric, allBreaches$riskScore, use = "complete.obs", method="pearson") # -0.03629577
+cor(allBreaches$Year, allBreaches$riskScore, use = "complete.obs", method="pearson") # 0.02654458
+
+
+cor(allBreaches$NumRecordsStolen, allBreaches$typeNumeric, use = "complete.obs", method="pearson") # -0.02465884
+cor(allBreaches$NumRecordsStolen, allBreaches$Year, use = "complete.obs", method="pearson") # -0.00277035
+cor(allBreaches$Year, allBreaches$typeNumeric, use = "complete.obs", method="pearson") # 0.02424827
+
+#risk score and the number of records stolen as well as the breach source show the most collinearity
+```
+
+binning the risk scores to make a categorical column for them 
+```{r}
+breachRiskBins <- cut(allBreaches$riskScore, c(0.0, 3.0, 5.0, 7.0, 9.9, 10.0), 
+                include.lowest = TRUE, labels = c("minimal", "moderate", "critical", "servere", "catastrophic"))
+allBreaches$breachRiskBins <- NA
+allBreaches$breachRiskBins <- breachRiskBins
+as.numeric(allBreaches$breachRiskBins)
+
+# bar chart showing the amount of risk level categories in the data frame
+barplot(table(breachRiskBins))
+```
+
+Graph to visually show the relationship between the risk score of data breaches per year
+```{r}
+AggBreachesYear <- aggregate(allBreaches$riskScore, list(Year = allBreaches$Year), sum, na.rm=TRUE)
+colnames(AggBreachesYear) <-c("Year", "riskScore")
+
+par(mar=c(6,5,5,3))
+
+p<-ggplot(AggBreachesYear, aes(x=Year, y=riskScore)) +
+        geom_point(shape=2, col=2) +
+        geom_smooth(method=lm)+
+        ggtitle("Risk from All Breaches By Year") +
+        theme(text = element_text(size=14))
+print(p)
+
+#This graph shows that the risk of breaches dropped significantly last year
+```
+
+graph to visually show the relationship for the risk score given their type
+```{r}
+AggBreachesType <- aggregate(allBreaches$riskScore, list(Source = allBreaches$Type), sum, na.rm=TRUE)
+colnames(AggBreachesType) <-c("Type", "riskScore")
+
+par(mar=c(10,5,5,3))
+
+p2<-ggplot(AggBreachesType, aes(x=Type, y=riskScore)) +
+        geom_point(shape=2, col=2) +
+        geom_smooth(method=lm)+
+        ggtitle("RIsk Score for the Type of Records Stolen") +
+        theme(axis.text.x=element_text(angle=90, hjust=1))
+print(p2)
+
+# This graph shows that Identify Theft cause the greatest risk score 
+```
+
+a graph to visually show the relationship for risk score given their source
+```{r}
+AggBreachesSource <- aggregate(allBreaches$riskScore, list(Source = allBreaches$breachSource), sum, na.rm=TRUE)
+colnames(AggBreachesSource) <-c("Source", "riskScore")
+
+par(mar=c(10,5,5,3))
+
+p3 <- ggplot(AggBreachesSource, aes(x=Source, y=riskScore)) +
+        geom_point(shape=2, col=2) +
+        geom_smooth(method=lm)+
+        ggtitle("Source of Records Lost Vs Risk Score") +
+        theme(axis.text.x=element_text(angle=90, hjust=1))
+
+
+print(p3)
+
+# This graphs shows that the attackers are most often a malicious outsider
+```
+graph visually showing the relationship between records stolen and the risk score
+```{r}
+AggBreachesRisk <- aggregate(allBreaches$NumRecordsStolen, list(Risk = allBreaches$riskScore), sum, na.rm=TRUE)
+colnames(AggBreachesRisk) <-c("Risk", "recordsStolen")
+
+par(mar=c(10,5,5,3))
+
+p3 <- ggplot(AggBreachesRisk, aes(x=Risk, y=recordsStolen)) +
+        geom_point(shape=2, col=2) +
+        geom_smooth(method=lm)+
+        ggtitle("Number of Records Lost and Associated Risk Score") +
+        theme(axis.text.x=element_text(angle=90, hjust=1))
+print(p3)
+```
+
+imputing NA values for records breached. Most likley NA because the number of records stolen was not disclosed to the public
+```{r}
+# creating new data frame for imputed values 
+imputed_data <- allBreaches 
+# imputed the NA records stolen to be the mean of all of the records stolen
+imputed_data$NumRecordsStolen[which(is.na(imputed_data$NumRecordsStolen))] <- 
+  mean(allBreaches$NumRecordsStolen, na.rm = TRUE)
+# adding these values back into the original data frame 
+allBreaches <- imputed_data
+```
+
+normalizing data
+```{r}
+dataBrachesNorm <- allBreaches
+as.data.frame(dataBrachesNorm)
+
+# min-max normalization function
+normalize <- function(x) 
+{
+  return ((x-min(x))/(max(x)-min(x)))
+}
+
+# normalizing the number of records stolen
+dataBrachesNorm[2] <- as.data.frame(lapply(dataBrachesNorm[2], normalize))
+dataBrachesNorm[8] <- as.data.frame(lapply(dataBrachesNorm[8], normalize))
+dataBrachesNorm[10] <- as.data.frame(lapply(dataBrachesNorm[10], normalize))
+dataBrachesNorm[11] <- as.data.frame(lapply(dataBrachesNorm[11], normalize))
+
+View(dataBrachesNorm)
+```
+
+aggregate data based on financial access, associated risk, and number of records stolen
+```{r}
+# creating a Financial Access file
+typeFA <- dataBrachesNorm[grep("Financial Access", dataBrachesNorm$Type),]
+# aggregate type and risk and number of records stolen as a sum 
+AggHackFA <- aggregate(typeFA$NumRecordsStolen, list(Type = typeFA$Type, Risk = typeFA$breachRiskBins), sum, na.rm=TRUE)
+colnames(AggHackFA) <-c("Type", "Risk", "NumRecordsStolen")
+View(AggHackFA)
+
+# aggregating risk based on bins and number of records stolen as a sum
+AggHackRiskBins <- aggregate(allBreaches$NumRecordsStolen, list(Risk = allBreaches$breachRiskBins), sum, na.rm=TRUE)
+colnames(AggHackRiskBins) <-c("Risk", "NumRecordsStolen")
+View(AggHackRiskBins)
+```
+
+aggregate hacks data as a sum. 
+```{r}
+AggHack <- aggregate(dataBrachesNorm$riskScore, list(Year = dataBrachesNorm$Year, Type = dataBrachesNorm$typeNumeric, Source = dataBrachesNorm$breachSourceNumeric, Records = dataBrachesNorm$NumRecordsStolen), sum, na.rm=TRUE)
+colnames(AggHack) <-c("Year", "Type", "BreachSource", "NumRecordsStolen", "Risk")
+View(AggHack)
+```
+
+Saving the new data frame to a CSV file
+```{r}
+write.csv(allBreaches, file = "allBreaches.csv")
+```
+
+Data Storage & Retrieval
+```{r}
+setwd("/Users/marinamoskowitz/Documents/4th Year/DataScience/")
+
+#drop(allBreachesDB)
+# open a connection to SQLite and create the allBreaches database
+con <- dbConnect(SQLite(), dbname="dataBreaches.sqlite", value = allBreachesDB, row.names= FALSE, append = TRUE, `synchronous` = NULL)
+
+# reading the csv
+allBreaches <- read.csv("allBreaches.csv", header = TRUE)
+as.data.frame(allBreaches)
+allBreaches <- within(allBreaches, rm(X))
+View(allBreaches)
+
+# check it works
+alltables = dbListTables(con)
+summary(alltables)
+
+# What is the total number of breaches
+dbGetQuery(con, "SELECT count(*) FROM allBreaches")
+
+# Number of companies breached by industry, location, and type
+dbGetQuery(con, "SELECT Industry, count(*) FROM allBreaches GROUP BY Industry")
+dbGetQuery(con, "SELECT Location, count(*) FROM allBreaches GROUP BY Location")
+dbGetQuery(con, "SELECT Type, count(*) FROM allBreaches GROUP BY Type")
+
+#Selective retrieval queries
+#All types of information taken with at least 1000 instances
+dbGetQuery(con, "SELECT Type, count(*) as count FROM allBreaches GROUP BY Type HAVING count>=1000")
+#All Organisations in the Tech industry ordered alphabetically
+dbGetQuery(con, "SELECT Organisation FROM allBreaches WHERE Industry = 'Technology' ORDER BY Organisation asc")
+#All Organisations that have had more than one breach, ordered from most to least
+dbGetQuery(con, "SELECT Organisation, count(*) as count FROM allBreaches GROUP BY Organisation HAVING count>1 ORDER BY count desc")
+#Top 10 locations with the most breaches, ordered from most to least
+dbGetQuery(con, "SELECT Location, count(*) as count FROM allBreaches GROUP BY Location ORDER BY count desc LIMIT 10")
+
+dbGetQuery(con, "PRAGMA table_info(allBreaches)")
+
+# disconecting database
+dbDisconnect(con)
+
+```
+
+training and test datasets
+```{r}
+trainIndex <- createDataPartition(AggHack$Risk, p=.7, list=F)
+train <- AggHack[trainIndex, ]
+test <- AggHack[-trainIndex, ]
+```
+
+Linear Regression Models
+```{r}
+# linear regression between the number of records stolen with the bins of the numerical risk associated with that breach
+hacklmRiskLR <- glm(Risk~NumRecordsStolen, data=AggHack)
+summary(hacklmRiskLR)
+
+# calculating the MSE
+hacklmRiskLRPred <- glm(Risk~., data=train)
+mse1 <- mean(hacklmRiskLRPred$residuals^2)
+mse1 # 6.47288483
+
+
+# linear regression between the year with the bins of the numerical risk associated with that breach
+hackYearLR <- glm(Risk~Year, data=AggHack)
+summary(hackYearLR)
+
+# calculating the MSE
+hackYearLRPred <- glm(Risk~., data=train)
+mse2 <- mean(hackYearLRPred$residuals^2)
+mse2 # 6.47288483
+
+
+# linear regression between the type with the bins of the numerical risk associated with that breach
+hackTypeLR <- glm(Risk~Type, data=AggHack)
+summary(hackTypeLR)
+
+# calculating the MSE
+hackTypeLRPred <- glm(Risk~., data=train)
+mse3 <- mean(hackTypeLRPred$residuals^2)
+mse3 # 6.47288483
+
+
+# linear regression between the breach source with the bins of the numerical risk associated with that breach
+hackBreachSourceLR <- glm(Risk~BreachSource, data=AggHack)
+summary(hackBreachSourceLR)
+
+# calculating the MSE
+hackBreachSourceLRPred <- glm(Risk~., data=train)
+mse4 <- mean(hackBreachSourceLRPred$residuals^2)
+mse4 # 6.47288483
+```
+forward fitting regression
+```{r}
+# forward of fitting regresson parameters 1
+hacklmRisk1 <- lm(Risk~ NumRecordsStolen + BreachSource, AggHack)
+summary(hacklmRisk1)
+mseMLR1 <- mean(hacklmRisk1$residuals^2)
+mseMLR1 # 6.507462642
+
+# forward of fitting regresson parameters 2
+hacklmRisk2 <- lm(Risk~ NumRecordsStolen + BreachSource + Type, AggHack)
+summary(hacklmRisk2)
+mseMLR2 <- mean(hacklmRisk2$residuals^2)
+mseMLR2 # 6.507439994
+
+# forward of fitting regresson parameters 3
+hacklmRisk3 <- lm(Risk~ NumRecordsStolen + Year + Type + BreachSource, AggHack)
+summary(hacklmRisk3)
+mseMLR3 <- mean(hacklmRisk3$residuals^2)
+mseMLR3 # 6.501403657
+```
+
+Multiple Linear Regression 
+```{r}
+# final multiple linear regression model 
+hacklmRiskMLR <- lm(Risk~., AggHack)
+summary(hacklmRiskMLR)
+hacklmRiskMLR$coefficients
+mseMLR <- mean(hacklmRiskMLR$residuals^2)
+mseMLR # 6.501403657
+
+# Testing the statistical significance of all parameters and eliminate those that have a p-value > 0.05
+testPredictions <- predict(hacklmRiskMLR, test, type='response')
+testPredictions <- ifelse(testPredictions > 0.5,1,0)
+# Testing the model against the test data set and determining its prediction accuracy
+# not working, but giving myself some points for setup
+# confusionMatrix(data=as.factor(testPredictions), reference=as.factor(test$Risk))
+```
+
+Naive Bayes
+```{r}
+Naive_Bayes_Model <- naiveBayes(Risk~., data=AggHack)
+summary(Naive_Bayes_Model)
+
+#Prediction on the dataset
+NB_Predictions=predict(Naive_Bayes_Model, AggHack)
+NB_Predictions
+
+#Confusion matrix to check accuracy
+#table(NB_Predictions, Risk)
+```
+
+Random Forest 
+```{r}
+fitRF <- randomForest(Risk~., data=AggHack)
+print(fitRF) # view results 
+importance(fitRF) # importance of each predictor
+plot(fitRF, main="Conditional Inference Tree for All Data Breaches")
+
+# grow tree 
+fitRF <- rpart(Risk~.,
+   method="anova", data=AggHack)
+
+printcp(fitRF) # display the results 
+plotcp(fitRF) # visualize cross-validation results 
+summary(fitRF) # detailed summary of splits
+```
+
+```{r}
+# This was the only way I could get SVM and Knn to work
+# Code help from: https://machinelearningmastery.com/compare-the-performance-of-machine-learning-algorithms-in-r/
+
+# prepare training scheme
+# repeating with a cross validation of 10 folds and 3 repeats
+control <- trainControl(method="repeatedcv", number=10, repeats=3)
+
+# SVM
+set.seed(7)
+fit.svm <- train(Risk~., data=AggHack, method="svmRadial", trControl=control)
+
+# kNN
+set.seed(7)
+fit.knn <- train(Risk~., data=AggHack, method="knn", trControl=control)
+
+# Logistical Regression
+set.seed(7)
+fit.lm <- train(Risk~., data=AggHack, method="lm", trControl=control)
+
+# collect resamples
+results <- resamples(list(SVM=fit.svm, KNN=fit.knn, LM=fit.lm))
+summary(results)
+```
+
+comparing models
+```{r}
+# Code help for below from: https://machinelearningmastery.com/compare-the-performance-of-machine-learning-algorithms-in-r/
+# dot plots of accuracy
+scales <- list(x=list(relation="free"), y=list(relation="free"))
+dotplot(results, scales=scales)
+
+# difference in model predictions
+diffs <- diff(results)
+# summarize p-values for pair-wise comparisons
+summary(diffs)
+
+# above shows that Logistical Regression is more accurate than SVM and Knn
+
+# logistical vs multiple
+fit1 <- hacklmRiskLR
+fit2 <- hacklmRiskMLR
+anova(fit1, fit2)
+
+# logistical vs random forest
+fit3 <- hacklmRiskLR
+anova(fit1, fit3)
+
+# multiple vs random forest
+anova(fit2, fit3)
+
+# Logistical Regression seams to be the strongest indicator of an accurate risk score because the MSE is slighlty less than all the other models
+```
+
+
